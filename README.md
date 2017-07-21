@@ -38,12 +38,12 @@ modules are bug free and therefore do not recommend you try this on a machine on
 which you rely on KVM.
 
 Begin by checking out the branch appropriate for your kernel version.
-For this walk-through, we will be using the linux-4.4.y-vmi branch.
+For this walk-through, we will be using the linux-4.4.y-rvmi branch.
 
 ```
 $ git clone https://github.com/fireeye/rvmi-kvm.git rvmi-kvm
 $ cd rvmi-kvm
-$ git checkout linux-4.4.y-vmi
+$ git checkout linux-4.4.y-rvmi
 ```
 
 At this point you will have to copy your current kernel config into this folder.
@@ -63,8 +63,7 @@ $ make prepare
 $ make scripts
 ```
 
-Once the kernel is built, subsequent compilation of the kvm modules can be completed
-with:
+Finally build the KVM kernel modules:
 
 ```
 $ make modules SUBDIR=arch/x86/kvm/
