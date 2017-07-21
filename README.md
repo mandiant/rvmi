@@ -51,14 +51,16 @@ Generally, the config can be found in the /boot/ directory.  The name and locati
 of this config may vary depending on your Linux distribution.
 
 ```
-$ cp /boot/config-4.4.39 ./.config
+$ cp /boot/config-`uname -r` .config
+$ cp /usr/src/linux-headers-$(uname -r)/Module.symvers .
 ```
 
-Having done this, you will need to configure and build the kernel source once.
+Having done this, you will need to configure your kernel.
 
 ```
-$ make oldconfig
-$ make modules && make
+$ yes "" | make oldconfig
+$ make prepare
+$ make scripts
 ```
 
 Once the kernel is built, subsequent compilation of the kvm modules can be completed
