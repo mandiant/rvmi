@@ -1,0 +1,169 @@
+#!/bin/bash
+
+# minimum is 3.x
+min_kernel_version=7
+
+force_build=
+kernelsourcedir=
+kerneldir=/lib/modules/$(uname -r)/build
+cc=gcc
+ld=ld
+objcopy=objcopy
+ar=ar
+want_module=1
+cross_prefix=
+arch=`uname -m`
+if [ -z "TMPDIR" ] ; then
+    TMPDIR=.
+fi
+
+usage() {
+    cat <<-EOF
+	Usage: $0 [options]
+
+	Options include:
+	    --arch=ARCH            architecture to compile for ($arch)
+	    --cross-prefix=PREFIX  prefix for cross compile
+	    --kerneldir=DIR        kernel build directory ($kerneldir)
+	    --force                continue even if kernel is not supported
+	    --help                 this helpful text
+EOF
+    exit 1
+}
+
+while [[ "$1" = -* ]]; do
+    opt="$1"; shift
+    arg=
+    hasarg=
+    if [[ "$opt" = *=* ]]; then
+	arg="${opt#*=}"
+	opt="${opt%%=*}"
+	hasarg=1
+    fi
+    case "$opt" in
+	--kerneldir)
+	    kerneldir="$arg"
+	    ;;
+        --force)
+            force_build=1
+            ;;
+	--with-patched-kernel)
+	    want_module=
+	    ;;
+	--arch)
+	    arch="$arg"
+	    ;;
+	--cross-prefix)
+	    cross_prefix="$arg"
+            ;;
+	--help)
+	    usage
+	    ;;
+	*)
+	    usage
+	    ;;
+    esac
+done
+
+karch="$arch"
+
+case $arch in
+    i?86*|x86_64*)
+        arch=${arch/#i?86/i386}
+	karch="x86"
+        ;;
+esac
+
+kvm_version() {
+    local fname="$(dirname "$0")/KVM_VERSION"
+
+    if test -f "$fname"; then
+        cat "$fname"
+    else
+        echo "kvm-devel"
+    fi
+}
+
+arch=${arch%%-*}
+
+kerneldir=$(cd $kerneldir; pwd)
+
+# see if we have split build and source directories
+if [ ! -e "$kerneldir/Kbuild" ]; then
+    kernelsourcedir=$kerneldir/source
+    if [ ! -L "$kernelsourcedir" ]; then
+        kernelsourcedir=${kerneldir%/build*}/source
+    fi
+fi
+
+kernel_version_str=
+if [ -e "$kerneldir/.kernelrelease" ]; then
+	kernel_version_str=`cat "$kerneldir/.kernelrelease"`
+elif [ -e "$kerneldir/include/config/kernel.release" ]; then
+	kernel_version_str=`cat "$kerneldir/include/config/kernel.release"`
+elif [ -e "$kerneldir/.config" ]; then
+	kernel_version_str=$(awk '/Linux kernel version:/ { print $NF }' \
+		"$kerneldir/.config")
+fi
+if [ ! -n "$kernel_version_str" ]; then
+	echo
+	echo "Error: kernel version not found."
+	echo "Please make sure your kernel is configured."
+	echo
+	exit 1
+fi
+
+kernel_version=`echo $kernel_version_str | sed 's/\([0-9]*\)\.[0-9]*\.[0-9]*.*/\1/'`
+kernel_patchlevel=`echo $kernel_version_str | sed 's/[0-9]*\.\([0-9]*\)\.[0-9]*.*/\1/'`
+if [ ! -n "$force_build" ]; then
+	if [ $kernel_version -eq 2 ] ||
+	   [ $kernel_version -eq 3 -a $kernel_patchlevel -lt $min_kernel_version ]; then
+		echo
+		echo "Error: kernel is too old for this kvm-kmod release."
+		echo
+		exit 1
+	fi
+fi
+
+kernel_extraversion=`echo $kernel_version_str | sed 's/[0-9]*\.[0-9]*\.[0-9]*\.\([0-9]*\)*.*/\1/'`
+if [ ! -n $kernel_extraversion ] || [ $kernel_extraversion = $kernel_version_str ]; then
+	kernel_extraversion=0
+fi
+
+. "$kerneldir/.config"
+
+if [ -n "$no_uname" -a "$want_module" ]; then
+	depmod_version=$kernel_version_str
+fi
+
+# Check if it is a Fedora kernel, e.g. 2.6.35.13-91.fc14.x86_64
+if echo "$kernel_version_str" | grep -qE '[0-9.-]+\.fc[0-9]+\..+'; then
+    config_fedora_kernel="#define CONFIG_FEDORA_KERNEL 1"
+else
+    config_fedora_kernel="#undef CONFIG_FEDORA_KERNEL"
+fi
+
+rm -f include/asm include/uapi/asm include-compat/asm
+mkdir -p include/uapi
+ln -sf asm-"$karch" include/asm
+ln -sf asm-"$karch" include/uapi/asm
+ln -sf asm-"$karch" include-compat/asm
+
+cat <<EOF > config.mak
+export ARCH=$arch
+PREFIX=$prefix
+KERNELDIR=$kerneldir
+KERNELSOURCEDIR=$kernelsourcedir
+KERNELVERSION=$kernel_version_str
+export CROSS_COMPILE=$cross_prefix
+export CC=$cross_prefix$cc
+export LD=$cross_prefix$ld
+export OBJCOPY=$cross_prefix$objcopy
+export AR=$cross_prefix$ar
+KVM_VERSION=$(kvm_version)
+EOF
+
+cat <<EOF > kvm-kmod-config.h
+#define KERNEL_EXTRAVERSION $kernel_extraversion
+$config_fedora_kernel
+EOF

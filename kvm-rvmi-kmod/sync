@@ -1,0 +1,624 @@
+#!/usr/bin/python
+
+import sys, os, glob, os.path, shutil, re
+from optparse import OptionParser
+
+glob = glob.glob
+
+def cmd(c):
+    if os.system(c) != 0:
+        raise Exception('command execution failed: ' + c)
+
+parser = OptionParser(usage = 'usage: %prog [-v VERSION][-l LINUX]')
+parser.add_option('-v', action = 'store', type = 'string', dest = 'version', \
+                  help = 'kvm-kmod release version', default = 'kvm-devel')
+parser.add_option('-l', action = 'store', type = 'string', dest = 'linux', \
+                  help = 'Linux kernel tree to sync from', \
+                  default = 'linux')
+parser.set_defaults()
+(options, args) = parser.parse_args()
+version = options.version
+linux = options.linux
+
+_re_cache = {}
+
+def re_cache(regexp):
+    global _re_cache
+    if regexp not in _re_cache:
+        _re_cache[regexp] = re.compile(regexp)
+    return _re_cache[regexp]
+
+def hack_content(fname, data):
+    compat_apis = str.split(
+        'desc_struct ldttss_desc64 desc_ptr '
+        'hrtimer_add_expires_ns hrtimer_get_expires '
+        'hrtimer_get_expires_ns hrtimer_start_expires '
+        'hrtimer_expires_remaining smp_send_reschedule '
+        'on_each_cpu relay_open anon_inode_getfd '
+        'do_machine_check get_desc_base get_desc_limit '
+        'vma_kernel_pagesize native_read_tsc user_return_notifier '
+        'user_return_notifier_register user_return_notifier_unregister '
+        'synchronize_srcu synchronize_srcu_expedited '
+        'monotonic_to_bootbased '
+        'check_tsc_unstable native_store_idt invalidate_tss_limit '
+        'set_desc_base set_desc_limit pvclock_vcpu_time_info tboot_enabled '
+        'native_write_msr_safe mmget mmgrab '
+        'fpregs_state xregs_state fxregs_state fpregs_active '
+        'xstate_size cpu_has_xsave cpu_has_xsaves '
+        '__get_user_pages_fast set_64bit siginfo_t use_mm get_user_pages '
+        'unuse_mm request_threaded_irq init_fpu __this_cpu_read '
+        '__this_cpu_write sigset_from_compat get_user_pages_remote '
+	'get_user_pages_unlocked '
+        'sched_info_on x86_pmu_capability perf_get_x86_pmu_capability '
+        'cpuid10_eax cpuid10_edx kern_path inode_permission path_put '
+        'kmap_atomic kunmap_atomic timespec_sub '
+        'static_key static_key_deferred static_key_false '
+        'static_key_slow_inc static_key_slow_dec static_key_slow_dec_deferred '
+        'jump_label_rate_limit fixup_user_fault __pvclock_read_cycles'
+        )
+    modparam_vars = str.split(
+        'dbg enable_vpid flexpriority_enabled enable_ept '
+        'enable_unrestricted_guest emulate_invalid_guest_state '
+        'vmm_exclusive fasteoi nested ignore_msrs enable_ept_ad_bits '
+        'enable_apicv_reg_vid enable_apicv enable_shadow_vmcs '
+        )
+    eventfd_file = fname == 'eventfd.c'
+    result = []
+    pr_fmt = ''
+    inside_block_state = {}
+    finish_endif = False
+
+    def sub(regexp, repl, str):
+        return re_cache(regexp).sub(repl, str)
+
+    for line in data.splitlines():
+        def match(regexp):
+            return re_cache(regexp).search(line)
+
+        def get_block_key(start_regexp, end_regexp):
+            key = start_regexp + '\n' + end_regexp
+            if not inside_block_state.has_key(key):
+                inside_block_state[key] = False
+            return key
+
+        def inside_block(start_regexp, end_regexp):
+            key = get_block_key(start_regexp, end_regexp)
+            if inside_block_state[key]:
+                if match(end_regexp):
+                    inside_block_state[key] = False
+            elif match(start_regexp):
+                inside_block_state[key] = True
+                return False
+            return inside_block_state[key]
+
+        def match_block_end(start_regexp, end_regexp):
+            key = get_block_key(start_regexp, end_regexp)
+            if inside_block_state[key]:
+                if match(end_regexp):
+                    inside_block_state[key] = False
+                    return True
+            elif match(start_regexp):
+                inside_block_state[key] = True
+            return False
+
+        def w(line, result = result):
+            result.append(line)
+
+        orig = line
+        f = line.split()
+        if match(r'^#define pr_fmt'):
+            pr_fmt = sub(r'#define pr_fmt\([^)]*\) ("[^"]*").*', r'\1', line) + ' '
+            line = ''
+        line = sub(r'pr_debug\(([^),]*)', r'pr_debug(' + pr_fmt + r'\1', line)
+        if fname == 'kvm_main.c' and inside_block(r'^int kvm_init\(', r'^}'):
+            if match(r'r = kvm_arch_init\(opaque\);'):
+                w('\tr = kvm_init_srcu();')
+                w('\tif (r)')
+                w('\t\treturn r;\n')
+                w('\tpreempt_notifier_sys_init();\n')
+            elif match(r'return 0;'):
+                w('\tprintk("loaded kvm module (%s)\\n");\n' % (version,))
+                w('\tkvm_clock_warn_suspend_bug();\n')
+            elif match(r'return r;'):
+                w('\tpreempt_notifier_sys_exit();')
+                w('\tkvm_exit_srcu();')
+        if match_block_end(r'^void kvm_exit\(void\)$', r'^}'):
+            w('\tpreempt_notifier_sys_exit();')
+            w('\tkvm_exit_srcu();')
+        if match(r'MODULE_AUTHOR'):
+            w('MODULE_INFO(version, "%s");' % (version,))
+        if match(r'_stat_get|lost_records_get'):
+            if match(r'DEFINE_SIMPLE_ATTRIBUTE'):
+                name = sub(r',', '', f[1])
+                w('MAKE_SIMPLE_ATTRIBUTE_GETTER(' + name + ')')
+	    else:
+                line = sub(r'\b(\w+_stat_get|lost_records_get)', r'__\1', line)
+        line = sub(r'linux/mm_types\.h', 'linux/mm.h', line)
+        line = sub(r'\b__user\b', ' ', line)
+        if match(r'#include <linux/compiler.h>'):
+            line = ''
+        if match(r'#include <linux/clocksource.h>'):
+            line = ''
+        if match(r'#include <linux\/types.h>'):
+            line = '#include <asm/types.h>'
+        if match(r'\t\.change_pte.*kvm_mmu_notifier_change_pte,'):
+            line = '#ifdef MMU_NOTIFIER_HAS_CHANGE_PTE\n' + line + '\n#endif'
+        if match(r'static void kvm_mmu_notifier_change_pte'):
+            line = sub(r'static ', '', line)
+            line = '#ifdef MMU_NOTIFIER_HAS_CHANGE_PTE\n' + 'static\n' + '#endif\n' + line
+        if match(r'case KVM_CAP_SYNC_MMU'):
+            line = '#ifdef CONFIG_MMU_NOTIFIER\n' + line + '\n#endif'
+        for ident in compat_apis:
+            line = sub(r'\b' + ident + r'\b', 'kvm_' + ident, line)
+        if fname == 'svm.c':
+            line = sub(r'\bboot_cpu_has\b', 'kvm_boot_cpu_has', line)
+        if match(r'kvm_.*_fops\.owner = module;'):
+            line = 'IF_ANON_INODES_DOES_REFCOUNTS(' + line + ')'
+        if not match(r'#include'):
+            line = sub(r'\blapic\n', 'l_apic', line)
+        if inside_block(r'struct pt_regs regs = {', r'};'):
+            if match(r'\.cs'):
+                line = sub(r'cs', r'kvm_pt_regs_cs', line)
+            if match(r'\.flags'):
+                line = sub(r'flags', r'kvm_pt_regs_flags', line)
+        line = sub(r'boot_cpu_data.x86_phys_bits', 'kvm_x86_phys_bits', line)
+        if match(r'^static const struct vm_operations_struct kvm_'):
+            line = sub(r' const ', ' ', line)
+        if eventfd_file and line == '#include <kvm/iodev.h>':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33)')
+        if line == 'int kvm_irqfd_init(void);':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33)')
+        if line == 'void kvm_irqfd_exit(void);':
+            w('#else')
+            w('static inline int kvm_irqfd_init(void) { return 0; }')
+            w('static inline void kvm_irqfd_exit(void) { }')
+            w('#endif')
+        if match(r'^\tcase KVM_IOEVENTFD: {'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,33)')
+        if match(r'#include <asm/desc_defs.h>'):
+            line = ''
+        if match(r'struct fpu '):
+            line = sub(r'struct fpu ', 'struct kvm_compat_fpu ', line)
+        if match(r'^static int mmu_shrink\('):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)')
+            w(line)
+            w('#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,35)')
+            w('static int mmu_shrink(struct shrinker *shrink, int nr_to_scan, gfp_t gfp_mask)')
+            w('#else')
+            w('static int mmu_shrink(int nr_to_scan, gfp_t gfp_mask)')
+            line = '#endif'
+        if line == '\tint nr_to_scan = sc->nr_to_scan;':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0)')
+            w(line)
+            line = '#endif'
+        if line == '\tkvm_x86_ops = ops;':
+            w('\tkvm_xstate_size_init();\n')
+        if match_block_end(r'case CPU_STARTING:', r'hardware_enable'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,28)')
+            w('\t\thardware_enable();')
+            w('#else')
+            w('\t\tsmp_call_function_single(cpu, (void (*)(void *))hardware_enable, NULL, 1);')
+            line = '#endif'
+        if match(r'case CPU_STARTING:'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,28)')
+            w('\tcase CPU_STARTING:')
+            w('#else')
+            w('\tcase CPU_ONLINE:')
+            line = '#endif'
+        if line == '\tsend_sig_info(SIGBUS, &info, tsk);':
+            line = '\tsend_sig_info(SIGBUS, (siginfo_t *)&info, tsk);'
+        if line == '\tcase KVM_CAP_ASYNC_PF:':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)')
+            w(line)
+            line = '#endif'
+        if match(r'\treturn hva_to_pfn\(kvm, addr, atomic, async'):
+            w('#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,39)')
+            w('\tasync = NULL;')
+            w('#endif')
+        if line == '\t.llseek\t\t= noop_llseek,':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,35)')
+            w(line)
+            line = '#endif'
+        if line == '\t.test_young\t\t= kvm_mmu_notifier_test_young,':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,38)')
+            w(line)
+            line = '#endif'
+        if match(r'static int kvm_mmu_notifier_test_young'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,38)')
+        if line == '\t.clear_young\t\t= kvm_mmu_notifier_clear_young,':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)')
+            w(line)
+            line = '#endif'
+        if match(r'static int kvm_mmu_notifier_clear_young'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)')
+        if line == 'static int kvm_suspend(void)':
+            line = 'int kvm_suspend(void)'
+        if line == 'static void kvm_resume(void)':
+            line = 'void kvm_resume(void)'
+        if line == '\t\t\tcpuid_mask(&entry->ebx, 9);':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)')
+            w(line)
+            w('#else')
+            w('\t\t\tentry->ebx = 0;');
+            w('#endif')
+        if match(r'#ifdef CONFIG_KVM_MMU_AUDIT'):
+            w('#undef CONFIG_KVM_MMU_AUDIT')
+        if line == 'static struct kvm_arch_event_perf_mapping {':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,3,0)')
+        for modparam_var in modparam_vars:
+            if match(r'^static bool.* ' + modparam_var + '[ ;]'):
+                w('#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,31)')
+                w(sub(r' bool ', r' int ', line))
+                w('#else')
+                w(line)
+                line = '#endif'
+        if line == '\tinit_kthread_worker(&pit->worker);':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)')
+        if match(r'kthread_stop\(.*->worker_task\)'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,36)')
+            w(line)
+            w('#else')
+            line = sub(r'kthread_stop', 'destroy_workqueue', line)
+            w(sub(r'worker_task', 'worker', line))
+            line = '#endif'
+        if inside_block(r'^void kvm_kvfree\(', r'^}') and line == '\t\tvfree(addr);':
+            line = '\t\tvfree((void *)addr);'
+        if fname == 'include/linux/kvm_host.h' and line == '#if defined(CONFIG_MMU_NOTIFIER) && defined(KVM_ARCH_WANT_MMU_NOTIFIER)':
+            line ='#if defined(KVM_ARCH_WANT_MMU_NOTIFIER)'
+        if line == '\t\tkfree_rcu(old, rcu);':
+            w('#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)')
+            w('\t\tcall_rcu(&old->rcu, kvm_apic_map_kfree_callback);')
+            w('#else')
+            w(line)
+            line = '#endif'
+        if line == '\tif (!kvm_fpregs_active() && !vmx->vcpu.guest_fpu_loaded)':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)')
+        if line == '\t\tstts();':
+            w(line)
+            w('#else')
+            w('\tif (kvm_fpregs_active())')
+            w('\t\tclts();')
+            line = '#endif'
+        if line == '\tvmcs_writel(HOST_CR0, read_cr0() & ~X86_CR0_TS);  /* 22.2.3 */':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)')
+            w(line)
+            w('#else')
+            w('\tvmcs_writel(HOST_CR0, read_cr0() | X86_CR0_TS);  /* 22.2.3 */')
+            line = '#endif'
+        if (inside_block('#ifdef CONFIG_X86_64', '#endif') and \
+            (line == 'struct pvclock_gtod_data {' or \
+             line == 'static atomic_t kvm_guest_has_master_clock = ATOMIC_INIT(0);' or \
+             line == 'static u64 read_tsc(void)' or \
+             line == 'static void pvclock_gtod_update_fn(struct work_struct *work)' or \
+             line == '\tbool vcpus_matched;' or \
+             match(r'^\tpvclock_gtod_(un)*register_notifier'))) or \
+            ((inside_block('static void kvm_gen_update_masterclock', '}') or \
+              inside_block('static void pvclock_update_vm_gtod_copy', '}')) and \
+             line == '#ifdef CONFIG_X86_64'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0)')
+            finish_endif = True
+        if line == '#endif' and finish_endif:
+            w('#endif')
+            finish_endif = False
+        if match(r'tkr_mono\.'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)')
+            w(line)
+            line = sub(r'tkr_mono\.base', 'tkr.base_mono', line)
+            line = sub(r'tkr_mono', 'tkr', line)
+            w('#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)')
+            w(line)
+            w('#else')
+            if match(r'tkr\.cycle_last') or match(r'tkr\.mask'):
+                w(sub(r'tkr\.', 'clock->', line))
+            elif match(r'tkr\.base_mono'):
+                w('\tboot_ns = kvm_get_boot_base_ns(tk);')
+            else:
+                w(sub(r'tkr\.', '', line))
+            line = '#endif'
+        if match_block_end('^static int kvm_mmu_notifier_clear_flush_young', '^}'):
+            w(line)
+            w('#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)')
+            w('static int kvm_mmu_notifier_clear_flush_young(struct mmu_notifier *mn,')
+            w('                                              struct mm_struct *mm,')
+            w('                                              unsigned long hva)')
+            w('{')
+            w('\treturn __kvm_mmu_notifier_clear_flush_young(mn, mm, hva, hva+1);')
+            w('}')
+            line = '#endif'
+        if match(r'^static int kvm_mmu_notifier_clear_flush_young'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,18,0)')
+            w(line)
+            w('#else')
+            w(sub('kvm_', '__kvm_', line))
+            line = '#endif'
+        if match('POSTED_INTR_NESTED_VECTOR'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)')
+            w(line)
+            w('#else')
+            w(sub('POSTED_INTR_NESTED_VECTOR', 'POSTED_INTR_VECTOR', line))
+            line = '#endif'
+        if line == '#ifdef CONFIG_KEXEC':
+            line = '#if defined(CONFIG_KEXEC) && LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0)'
+        if line == '\tif (!cpu_has_vmx_apicv())':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)')
+            w(line)
+            w('#else')
+            w('if (1)')
+            line = '#endif'
+        if line == '#if IS_ENABLED(CONFIG_KVM)':
+            line = '#if 1'
+        if match(r'^\t+apic->send_IPI_mask\(get_cpu_mask\(vcpu->cpu\),$'):
+            w('#if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)')
+	    w('\t\t;')
+	    w('#else')
+        if match(r'^\t+POSTED_INTR_VECTOR\);$'):
+            w(line)
+            line = '#endif'
+	if match(r'^\tret = kvm_x86_ops->hardware_enable\(\);$'):
+	    w('\tkvm_do_store_gdt();');
+        line = sub(r'this_cpu_ptr\(&cpu_tss\)', 'kvm_read_tr_base()', line)
+        if line == '\tif (!static_cpu_has_bug(X86_BUG_AMD_TLB_MMATCH))':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)')
+            w(line)
+            w('#else')
+            w('\tif (!kvm_cpu_has_amd_erratum(kvm_amd_erratum_383))')
+            line = '#endif'
+
+        if line == 'static struct shrinker mmu_shrinker = {':
+            w('#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)')
+            w('static int mmu_shrink(struct shrinker *shrink, struct shrink_control *sc)')
+            w('{')
+            w('\tif (sc->nr_to_scan > 0)')
+            w('\t\tmmu_shrink_scan(shrink, sc);')
+            w('\treturn mmu_shrink_count(shrink, sc);')
+            w('}')
+            w('#endif')
+            w('')
+            w('static struct shrinker mmu_shrinker = {')
+            w('#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0)')
+            w('\t.shrink = mmu_shrink,')
+            line = '#else'
+        if eventfd_file and line == '#include <linux/kernel.h>':
+            w('#include <linux/module.h>')
+
+        # Large FPU changes in 4.2
+        if match(r'\b(__copy_kernel_to_fpregs|fpstate_init)\b'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)')
+            w(line)
+            w('#else')
+            # .state change from union pointer to union.  The older APIs
+            # took a struct fpu.
+            line = sub(r'\b__copy_kernel_to_fpregs\b', 'kvm_fpu_restore_checking', line)
+            line = sub(r'\bfpstate_init\b', 'kvm_fpstate_init', line)
+            line = sub(r'\b.state\b', '', line)
+            w(line)
+            line = '#endif'
+        if match(r'\bguest_fpu\.state\.|\bxsave\b.*\bheader\b'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)')
+            w(line)
+            line = sub(r'\bguest_fpu\.state\.', 'guest_fpu.state->', line)
+            line = sub(r'\bheader\.xfeatures\b', 'xsave_hdr.xstate_bv', line)
+            if match(r'\bheader\.xcomp_bv\b'):
+                w('#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)')
+                line = sub(r'\bheader\.xcomp_bv\b', 'xsave_hdr.xcomp_bv', line)
+                w(line)
+                # Will be under if (cpu_has_xsaves), which is always 0.  Just
+                # replace with something that compiles, the C statement might
+                # span more than one line.
+                line = 'WARN(1, "this should never happen"),\n' + \
+                           sub(r'xcomp_bv', 'xstate_bv', line)
+            w('#else')
+            w(line)
+            line = '#endif'
+        if line == '#include <asm/fpu/xstate.h>':
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)')
+            w(line)
+            w('#else')
+            w('#include <asm/i387.h>')
+            w('#include <asm/fpu-internal.h>')
+            w('#include <asm/xsave.h>')
+            line = '#endif'
+        if match(r'^#include <asm/fpu/internal\.h>'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)')
+            w(line)
+            w('#else')
+            w('#include <asm/i387.h>')
+            w('#include <asm/fpu-internal.h>')
+            w('#include <asm/xcr.h>')
+            line = '#endif'
+        if match(r'^#include <linux/sched/cputime\.h>'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)')
+            w(line)
+            w('#else')
+            w('#include <linux/cputime.h>')
+            line = '#endif'
+        if match(r'(remaining|target_expiration) = 0;$'):
+	    line = sub('0', 'ktime_set(0, 0)', line)
+	if match(r'\(struct vm_fault \*vmf\)'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)')
+            w(line)
+            w('#else')
+	    w(sub(r'\(.*\)', '(struct vm_area_struct *vma, struct vm_fault *vmf)', line))
+            line = '#endif'
+	if match(r'vmf->vma'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)')
+            w('\tstruct vm_area_struct *vma = vmf->vma;')
+            w('#endif')
+            line = sub('vmf->vma', 'vma', line);
+
+        w(line)
+
+        if line == '\t.scan_objects = mmu_shrink_scan,':
+            w('#endif')
+        if line == '\tkvm_arch_vcpu_put(vcpu);':
+            w('\tkvm_fire_urn();')
+        if match_block_end(r'(\tcase KVM_IOEVENTFD: {)', r'^\t}'):
+            w('#endif')
+        if line == '\t\tprintk(KERN_ERR "kvm: disabled by bios\\n");':
+            w('#ifndef KVM_TBOOT_ENABLED_WORKS\n')
+            w('\t\tprintk(KERN_ERR "kvm: if TXT is enabled in the BIOS, disable it\\n");')
+            w('#endif')
+        if match_block_end(r'^static int kvm_mmu_notifier_test_young', r'^}'):
+            w('#endif')
+        if match_block_end(r'^static int kvm_mmu_notifier_clear_young', r'^}'):
+            w('#endif')
+        if fname == 'cpuid.c' and line == '#include <linux/module.h>':
+            w('#include <linux/vmalloc.h>')
+            w('#include <linux/uaccess.h>')
+        if match_block_end(r'void kvm_handle_pmu_event\(struct kvm_vcpu \*vcpu\)', r'^}'):
+            w('#else')
+            w('#include "pmu-stubs.c"')
+            w('#endif')
+        if match_block_end(r'init_kthread_worker\(&pit->worker\);', r'if \(IS_ERR\(pit->worker_task\)\)'):
+            w('#else')
+            w('\t(void)pid_nr;')
+            w('\tpit->worker = create_singlethread_workqueue("kvm-pit");')
+            w('\tif (!pit->worker)')
+            w('#endif')
+        if line == 'module_param(min_timer_period_us, uint, S_IRUGO | S_IWUSR);':
+            w('\n#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)')
+            w('static void kvm_apic_map_kfree_callback(struct rcu_head *p)')
+            w('{')
+            w('\tkfree(container_of(p, struct kvm_apic_map, rcu));')
+            w('}')
+            w('#endif')
+        if line == '#define _ASM_X86_KVM_HOST_H':
+            w('#include <linux/clocksource.h>')
+
+        if match(r'kvm_x86_ops->vcpu_free'):
+            w('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)')
+            w('\tkvm_fpu_free(&vcpu->arch.guest_fpu);')
+            w('#endif')
+
+    if eventfd_file:
+        result.append('#else\n'
+                      'void kvm_eventfd_init(struct kvm *kvm) { }\n'
+                      'void kvm_irqfd_release(struct kvm *kvm) { }\n'
+                      'void kvm_irq_routing_update(struct kvm *kvm) { }\n'
+                      '#endif')
+    data = str.join('', [line + '\n' for line in result])
+    return data
+
+def hack_file(T, fname):
+    fullname = T + '/' + fname
+    data = file(fullname).read()
+    data = hack_content(fname, data)
+    file(fullname, 'w').write(data)
+
+def unifdef(fname):
+    data = file('unifdef.h').read() + file(fname).read()
+    file(fname, 'w').write(data)
+
+hack_files = {
+    'x86': str.split('kvm_main.c mmu.c vmx.c svm.c x86.c x86.h irq.h lapic.c'
+                     ' lapic.h i8254.c eventfd.c emulate.c async_pf.c'
+                     ' cpuid.c pmu.c paging_tmpl.h hyperv.c'),
+}
+
+def mkdir(dir):
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+
+def cp(src, dst):
+    mkdir(os.path.dirname(dst))
+    file(dst, 'w').write(file(src).read())
+
+def copy_if_changed(src, dst):
+    for dir, subdirs, files in os.walk(src):
+        ndir = dst + '/' + dir[len(src)+1:]
+        mkdir(ndir)
+        for fname in files:
+            old = ndir + '/' + fname
+            new = dir + '/' + fname
+            try:
+                if file(old).read() !=  file(new).read():
+                    raise Exception('different.')
+            except:
+                cp(new, old)
+
+def rmtree(path):
+    if os.path.exists(path):
+        shutil.rmtree(path)
+
+def header_sync(arch):
+    T = 'header'
+    rmtree(T)
+    for file in (glob('%(linux)s/include/linux/kvm*.h' % { 'linux': linux }) +
+                 glob('%(linux)s/include/linux/vfio.h' % { 'linux': linux }) +
+                 glob('%(linux)s/include/linux/frame.h' % { 'linux': linux }) +
+                 glob('%(linux)s/include/uapi/linux/kvm*.h' % { 'linux': linux })):
+        out = ('%(T)s/include/linux/%(name)s'
+               % { 'T': T, 'name': os.path.basename(file) })
+        cp(file, out)
+        unifdef(out)
+    for file in (glob('%(linux)s/include/kvm/*.h' % { 'linux': linux })):
+        out = ('%(T)s/include/kvm/%(name)s'
+               % { 'T': T, 'name': os.path.basename(file) })
+        cp(file, out)
+        unifdef(out)
+    for file in glob(('%(linux)s/include/trace/events/kvm*.h'
+                      % { 'linux': linux })):
+        out = ('%(T)s/include/trace/events/%(name)s'
+               % { 'T': T, 'name': os.path.basename(file) })
+        cp(file, out)
+        unifdef(out)
+    arch_headers = (
+        [x
+         for dir in ['%(linux)s/arch/%(arch)s/include/asm/kvm*.h',
+                     '%(linux)s/arch/%(arch)s/include/asm/vmx.h',
+                     '%(linux)s/arch/%(arch)s/include/asm/svm.h',
+                     '%(linux)s/arch/%(arch)s/include/asm/virtext*.h']
+         for x in glob(dir % { 'arch': arch, 'linux': linux })
+         ])
+    for file in arch_headers:
+        out = ('%(T)s/include/asm-%(arch)s/%(name)s'
+               % { 'T': T, 'name': os.path.basename(file), 'arch': arch })
+        cp(file, out)
+        unifdef(out)
+    arch_uapi_headers = (
+        [x
+         for dir in ['%(linux)s/arch/%(arch)s/include/uapi/asm/kvm*.h',
+                     '%(linux)s/arch/%(arch)s/include/uapi/asm/vmx.h',
+                     '%(linux)s/arch/%(arch)s/include/uapi/asm/svm.h',
+                     '%(linux)s/arch/%(arch)s/include/uapi/asm/msr-index.h',
+                     '%(linux)s/arch/%(arch)s/include/uapi/asm/hyperv.h']
+         for x in glob(dir % { 'arch': arch, 'linux': linux })
+         ])
+    for file in arch_uapi_headers:
+        out = ('%(T)s/include/uapi/asm-%(arch)s/%(name)s'
+               % { 'T': T, 'name': os.path.basename(file), 'arch': arch })
+        cp(file, out)
+        unifdef(out)
+    hack_file(T, 'include/linux/kvm_host.h')
+    hack_file(T, 'include/asm-%(arch)s/kvm_host.h' % { 'arch': arch })
+    if arch == 'x86':
+        hack_file(T, 'include/asm-x86/kvm_emulate.h')
+    copy_if_changed(T, '.')
+    rmtree(T)
+
+def source_sync(arch):
+    T = 'source'
+    rmtree(T)
+    sources = [file
+               for pattern in ['%(linux)s/arch/%(arch)s/kvm/*.[cSh]',
+                               '%(linux)s/virt/kvm/*.[cSh]']
+               for file in glob(pattern % { 'linux': linux, 'arch': arch })
+               if not file.endswith('.mod.c')
+               ]
+    for file in sources:
+        out = ('%(T)s/%(name)s'
+               % { 'T': T, 'name': os.path.basename(file) })
+        cp(file, out)
+
+    for i in glob(T + '/*.c'):
+        unifdef(i)
+
+    for i in hack_files[arch]:
+        hack_file(T, i)
+
+    copy_if_changed(T, arch)
+    rmtree(T)
+
+for arch in ['x86']:
+    header_sync(arch)
+    source_sync(arch)

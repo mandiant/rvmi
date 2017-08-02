@@ -1,0 +1,2 @@
+struct irq_work {
+};

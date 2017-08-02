@@ -1,0 +1,103 @@
+#!/bin/bash -e
+
+usage() {
+    echo "usage: $0 [--upload] [--formal] commit [name]"
+    exit 1
+}
+
+[[ -f ~/.kvmreleaserc ]] && . ~/.kvmreleaserc
+
+upload=
+formal=
+
+[[ -z "$TMP" ]] && TMP="/tmp"
+tmpdir="$TMP/kvm-kmod-make-release.$$"
+while [[ "$1" = -* ]]; do
+    opt="$1"
+    shift
+    case "$opt" in
+	--upload)
+	    upload="yes"
+	    formal="yes"
+	    ;;
+	--formal)
+	    formal="yes"
+	    ;;
+	*)
+	    usage
+	    ;;
+    esac
+done
+
+commit="$1"
+name="$2"
+
+if [[ -z "$commit" ]]; then
+    usage
+fi
+
+if [[ -z "$name" ]]; then
+    name="$commit"
+fi
+
+if [[ -n "$formal" ]] && ! git tag -v $name 2>/dev/null >/dev/null; then
+    git tag -as -m "" $name $commit
+fi
+
+releasedir=~/kvm-kmod-release
+rm -rf "$releasedir"
+mkdir "$releasedir"
+tarball="$releasedir/$name.tar.bz2"
+
+cd "$(dirname "$0")"/..
+srcdir=`pwd`
+LINUX="$(readlink -f "linux")"
+
+kvm_git="$(readlink -f .git)"
+linux_git="$(readlink -f "$LINUX/.git")"
+
+mkdir -p "$tmpdir/$name"
+mkdir -p "$tmpdir/$name/linux"
+
+files=("virt/kvm" "arch/x86" "include" "scripts" "Makefile"
+       )
+
+index="$tmpdir/index"
+
+rm -f "$index"
+GIT_INDEX_FILE="$index" git --git-dir="$kvm_git" read-tree "$commit"
+GIT_INDEX_FILE="$index" git --git-dir="$kvm_git" --work-tree="$tmpdir/$name" checkout "$commit" .
+lcommit=($(git --git-dir="$kvm_git" ls-tree "$commit" linux))
+lcommit="${lcommit[2]}"
+rm -f "$index"
+GIT_INDEX_FILE="$index" git --git-dir="$linux_git" read-tree "$lcommit"
+GIT_INDEX_FILE="$index" git --git-dir="$linux_git" \
+    --work-tree="$tmpdir/$name/linux" \
+    checkout "$lcommit" "${files[@]}"
+
+cd "$tmpdir/$name"
+
+if [[ -z "$formal" ]]; then
+    version="kvm-devel"
+else
+    version="$name"
+fi
+
+./configure --force
+make sync KVM_VERSION="$version"
+make distclean
+
+rm -rf "$tmpdir/$name/linux"
+
+if [[ -n "$formal" ]]; then
+    echo "$name" > "$tmpdir/$name/KVM_VERSION"
+fi
+
+tar cjf "$tarball" -C "$tmpdir" "$name"
+
+rm -rf "$tmpdir"
+
+if [[ -n "$upload" ]]; then
+    cp "$srcdir/readme-changelog.txt" "$releasedir"
+    scp -r "$releasedir" kiszka,kvm@frs.sourceforge.net:/home/frs/project/kvm/kvm-kmod/${name/kvm-kmod-/}
+fi

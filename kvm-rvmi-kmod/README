@@ -1,0 +1,52 @@
+kvm-kmod Quickstart
+-------------------
+
+./configure
+make
+make install
+
+
+Build Details
+-------------
+
+Building the KVM kernel module is performed differently depending on whether
+you are working from a clone of the git repository or from a source release.
+Notice that two kernels are involved: One from which the KVM sources
+are taken (kernel A), and one for which the module is built (kernel B).
+In almost all cases, kernel A is more recent than kernel B.
+
+- To build from a release (this is the default case), simply
+  use ./configure (possibly with any arguments that are required for
+  your setup, see ./configure --help) and make. The kernel specified
+  with --kerneldir refers to kernel B, that is, the kernel for which
+  the module is built. All sources required from kernel A are already
+  included in the release.
+
+- Building from a cloned git repository (most likely useful for developers
+  only) requires a kernel tree with the main kvm sources (kernel A) that
+  is included as a submodule in the linux/ directory.  By default, the KVM
+  development tree on git.kernel.org is used, but this can be changed in
+  the git configuration after the 'submodule init' step.
+
+  Before the kvm module can be built, the linux submodule must be initialised
+  and populated. The required sequence of commands is
+
+  git submodule init
+  git submodule update
+  ./configure
+  make sync
+  make
+
+  Notice that you can also specify an existing Linux tree for the
+  synchronisation stage by using
+
+  make sync LINUX=/path/to/kernel/A
+
+  LINUX specifies the path to kernel A from which the KVM sources are taken.
+  The directory must point to a local git tree, not to a plain directory
+  containing the kernel sources. If LINUX is unset, the default value is
+  linux/, i.e., the git submodule.
+
+  Note that configure may refuse to build against your target kernel if it
+  considers it too new or too old. If you know what you are doing, you can
+  override this check by passing --force.

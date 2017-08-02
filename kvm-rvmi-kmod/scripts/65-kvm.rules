@@ -1,0 +1,2 @@
+KERNEL=="kvm", MODE="0660", GROUP="kvm"
+ACTION=="add|change", SUBSYSTEM=="dmi", KERNEL=="id", RUN+="/bin/sh -c 'grep -q vmx /proc/cpuinfo && /sbin/modprobe kvm-intel; grep -q svm /proc/cpuinfo && /sbin/modprobe kvm-amd'"
