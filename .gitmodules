@@ -1,0 +1,3 @@
+[submodule "rvmi-qemu"]
+	path = rvmi-qemu
+	url = https://github.com/fireeye/rvmi-qemu.git
