@@ -4,3 +4,6 @@
 [submodule "rvmi-rekall"]
 	path = rvmi-rekall
 	url = https://github.com/fireeye/rvmi-rekall.git
+[submodule "kvm-rvmi-kmod/linux"]
+	path = kvm-rvmi-kmod/linux
+	url = https://github.com/fireeye/rvmi-kvm.git
