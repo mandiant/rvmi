@@ -1,3 +1,6 @@
 [submodule "rvmi-qemu"]
 	path = rvmi-qemu
 	url = https://github.com/fireeye/rvmi-qemu.git
+[submodule "rvmi-rekall"]
+	path = rvmi-rekall
+	url = https://github.com/fireeye/rvmi-rekall.git
