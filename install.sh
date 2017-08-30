@@ -17,6 +17,10 @@ if [ "${1}" = "build" ]; then
 elif [ "${1}" = "install" ]; then
     echo "install rVMI"
 
+    cd python/qmp/
+    python ./setup.py install
+    cd ../../
+
     cd rvmi-qemu
     make install
     cd ../
