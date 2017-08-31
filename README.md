@@ -15,125 +15,69 @@ time and to use typical debugging features such as breakpoints and watchpoints. 
 addtion, rVMI provides access to the entire Rekall feature set, which enables an
 analyst to inspect the kernel and its data structures with ease.
 
+NOTE: rVMI will only run on Intel CPUs with virtualization extentions.  Additionally,
+do not try to run rVMI within a virtualized environment.  As rVMI depends on hardware
+virtualization, it will not run in an already virtualized environment.
+
 ## Installation
-We are currently working hard to get a properly packaged release available,
-however for now you will need to compile and install the individual components
-yourself. rVMI consists of three components, KVM kernel modules, QEMU, and Rekall.
 
-### Installing rVMI-KVM
-Repository: <https://github.com/fireeye/rvmi-kvm>
+rVMI consists of three components, KVM kernel modules, QEMU, and Rekall. This
+repository will pull in all required components and install them with one
+simple install script.
 
-In order to build and install the KVM kernel modules, we have our VMI
-changes on the 4.4 and 4.10 branches of the upstream KVM repository.
-This will give you some flexibility in installing for these kernel versions.
-For now, if you are interested in installing on a different kernel version,
-you will have to rebase the VMI changes onto the appropriate upstream branch
-yourself.
+For those that are interested, the repositories for these components can be
+found here:  
+https://github.com/fireeye/rvmi-kvm  
+https://github.com/fireeye/rvmi-qemu  
+https://github.com/fireeye/rvmi-rekall
 
-*WARNING*: rVMI is currently only compatible with Intel CPUs, these instructions
-only consider the replacement of modules compatible with Intel CPUs.  Additionally,
-these steps will replace the kvm kernel modules on your system.  While we preserve
-backward compatibility with the vanilla modules, we do not guarantee that these
-modules are bug free and therefore do not recommend you try this on a machine on
-which you rely on KVM.
+### Getting Started
 
-Begin by checking out the branch appropriate for your kernel version.
-For this walk-through, we will be using the linux-4.4.y-rvmi branch.
+Begin by cloning the rVMI repository:
 
 ```
-$ git clone https://github.com/fireeye/rvmi-kvm.git rvmi-kvm
-$ cd rvmi-kvm
-$ git checkout linux-4.4.y-rvmi
+$ git clone --recursive https://github.com/fireeye/rvmi.git
+$ cd rvmi
 ```
 
-At this point you will have to copy your current kernel config into this folder.
-Generally, the config can be found in the /boot/ directory.  The name and location
-of this config may vary depending on your Linux distribution.
+### Build
+
+Building all components is handled by the install script. Simply perform the
+following steps:
 
 ```
-$ cp /boot/config-`uname -r` .config
-$ cp /usr/src/linux-headers-$(uname -r)/Module.symvers .
+$ ./install.sh build
 ```
 
-Having done this, you will need to configure your kernel.
+### Install
+
+The install script can also handle the installation of all components. This
+will install the following components:
+* qmp python module
+* rVMI QEMU
+* rVMI Rekall
+* rVMI KVM modules
+
+Installing these components can be achieved with the following command:
 
 ```
-$ yes "" | make oldconfig
-$ make prepare
-$ make scripts
+$ ./install.sh install
 ```
 
-Finally build the KVM kernel modules:
+#### Kernel Module Persistence
+This will not install the kernel modules in a persistent manner (it will not
+survive a reboot). In order to make these changes persistent, you must replace
+your KVM modules on the disk. Once built, the kernel modules can be found here:  
+kvm-rvmi-kmod/x86/*.ko
 
+These modules must be copied to the proper location on your machine.  This can
+be found by running:
 ```
-$ make modules SUBDIR=arch/x86/kvm/
-```
-
-The generated modules will replace your current KVM modules.  In order to replace
-them temporarily, follow these steps:
-
-```
-$ sudo rmmod kvm-intel
-$ sudo rmmod kvm
-$ sudo insmod arch/x86/kvm/kvm.ko
-$ sudo insmod arch/x86/kvm/kvm-intel.ko
+$ modinfo kvm
 ```
 
-If you would like to replace them permanently, please follow these steps (we
-recommend you first try replacing the modules temporarily to make sure they work):
-
-```
-$ sudo cp arch/x86/kvm/kvm.ko /lib/modules/$(uname -r)/kernel/arch/x86/kvm/kvm.ko
-$ sudo cp arch/x86/kvm/kvm-intel.ko /lib/modules/$(uname -r)/kernel/arch/x86/kvm/kvm-intel.ko
-$ sudo modprobe -r kvm-intel
-$ sudo modprobe -r kvm
-$ sudo modprobe kvm
-$ sudo modprobe kvm-intel
-```
-
-### Installing rVMI-QEMU
-Repository: <https://github.com/fireeye/rvmi-qemu>
-
-We recommend that you remove any previously installed versions of QEMU you
-may have installed.
-
-Begin by cloning the repository.
-
-```
-$ git clone https://github.com/fireeye/rvmi-qemu.git rvmi-qemu
-```
-
-Then, simply configure, compile, and install.
-
-```
-$ cd rvmi-qemu
-$ ./configure --target-list=x86_64-softmmu
-$ make
-$ sudo make install
-```
-
-### Installing rVMI-Rekall
-Repository: <https://github.com/fireeye/rvmi-rekall>
-
-We recommend that you remove any previously installed versions of Rekall you may
-have installed.
-
-```
-$ git clone https://github.com/fireeye/rvmi-rekall.git rvmi-rekall
-```
-
-Then install rekall.  We found that we had some issues when simply installing
-from the top level, so we recommend installing the rekall-agent and rekall-core
-components explicitly first.
-
-```
-$ cd rvmi-rekall/rekall-core
-$ sudo python ./setup.py install
-$ cd ../rekall-agent
-$ sudo python ./setup.py install
-$ cd ..
-$ sudo python ./setup.py install
-```
+Copy the kernel modules to the location specified by the "filename" output of
+the above command.
 
 ## Using rVMI
 
