@@ -141,6 +141,10 @@ def hack_content(fname, data):
             line = ''
         if match(r'#include <linux\/types.h>'):
             line = '#include <asm/types.h>'
+        if match(r'#define TRACE_INCLUDE_PATH arch\/x86\/kvm'):
+            line = '#define TRACE_INCLUDE_PATH .'
+        if match(r'task_cputime_adjusted\(current, &utime, &stime\);'):
+            line = 'task_cputime_adjusted(current, (cputime_t*)&utime, (cputime_t*)&stime);'
         if match(r'\t\.change_pte.*kvm_mmu_notifier_change_pte,'):
             line = '#ifdef MMU_NOTIFIER_HAS_CHANGE_PTE\n' + line + '\n#endif'
         if match(r'static void kvm_mmu_notifier_change_pte'):
@@ -512,7 +516,7 @@ def unifdef(fname):
 hack_files = {
     'x86': str.split('kvm_main.c mmu.c vmx.c svm.c x86.c x86.h irq.h lapic.c'
                      ' lapic.h i8254.c eventfd.c emulate.c async_pf.c'
-                     ' cpuid.c pmu.c paging_tmpl.h hyperv.c'),
+                     ' cpuid.c pmu.c paging_tmpl.h hyperv.c trace.h'),
 }
 
 def mkdir(dir):
