@@ -4,18 +4,18 @@
 
 rVMI is a debugger on steroids. It leverages Virtual Machine Introspection (VMI)
 and memory forensics to provide full system analysis. This means that an analyst
-can inspect userspace processes, kernel drivers, and preboot environments in a
+can inspect userspace processes, kernel drivers, and pre-boot environments in a
 single tool.
 
-It was specifially designed for interactive dynamic malware analysis. rVMI isolates
+It was specifically designed for interactive dynamic malware analysis. rVMI isolates
 itself from the malware by placing its interactive debugging environment out of the
 virtual machine (VM) onto the hypervisor-level. Through the use of VMI the analyst
 still has full control of the VM, which allows her to pause the VM at any point in
 time and to use typical debugging features such as breakpoints and watchpoints. In
-addtion, rVMI provides access to the entire Rekall feature set, which enables an
+addition, rVMI provides access to the entire Rekall feature set, which enables an
 analyst to inspect the kernel and its data structures with ease.
 
-NOTE: rVMI will only run on Intel CPUs with virtualization extentions.  Additionally,
+NOTE: rVMI will only run on Intel CPUs with virtualization extensions.  Additionally,
 do not try to run rVMI within a virtualized environment.  As rVMI depends on hardware
 virtualization, it will not run in an already virtualized environment.
 
