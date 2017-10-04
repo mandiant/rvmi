@@ -1740,7 +1740,7 @@ static inline void __cpumask_clear_cpu(int cpu, struct cpumask *dstp)
 #define wait_queue_entry_t wait_queue_t
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,6,0) && LINUX_VERSION_CODE > KERNEL_VERSION(4,4,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,6,0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4,5,0)
 #define CPUID_7_ECX 16
 #endif
 
